@@ -2,7 +2,11 @@
 
 #[cfg(feature = "generate_binding")]
 use std::path::PathBuf;
-use std::{env, fmt::Display, path::Path};
+use std::{
+    env,
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 /// Outputs the library-file's prefix as word usable for actual arguments on
 /// commands or paths.
@@ -36,6 +40,71 @@ fn generate_binding() {
     println!("cargo:info=Successfully generated binding.");
 }
 
+fn build_cmake_sys(opus_path: &Path) -> PathBuf {
+    cmake::build(opus_path)
+}
+
+fn find_latest_ndk() -> Option<String> {
+    let sdk_path = env::var("ANDROID_SDK_ROOT").unwrap_or_else(|_| {
+        // If ANDROID_SDK_ROOT is not set, fall back to a common default path
+        format!("{}/Android/Sdk", env::var("HOME").unwrap())
+    });
+
+    let ndk_dir = Path::new(&sdk_path).join("ndk");
+
+    // List the NDK directories and sort by version (assuming NDKs are numbered)
+    if ndk_dir.exists() {
+        let mut ndk_versions: Vec<PathBuf> = std::fs::read_dir(ndk_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .map(|e| e.path())
+            .collect();
+
+        // Sort directories by version
+        ndk_versions.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+        // Return the path to the latest NDK
+        ndk_versions
+            .last()
+            .map(|path| path.to_str().unwrap().to_string())
+    } else {
+        None
+    }
+}
+
+fn build_cmake_android(opus_path: &Path) -> PathBuf {
+    // Check if ANDROID_NDK is set
+    let ndk_path = match env::var("ANDROID_NDK") {
+        Ok(path) => path,
+        Err(_) => {
+            // Attempt to find the latest NDK version if ANDROID_NDK is not set
+            find_latest_ndk().expect("Could not find the NDK. Please set ANDROID_NDK.")
+        }
+    };
+
+    cmake::Config::new(opus_path)
+        .define(
+            "CMAKE_TOOLCHAIN_FILE",
+            format!("{}/build/cmake/android.toolchain.cmake", ndk_path),
+        )
+        .define("ANDROID_ABI", "arm64-v8a")
+        .define("CMAKE_ANDROID_ARCH_ABI", "arm64-v8a")
+        .define("ANDROID_PLATFORM", "android-27")
+        .define("ANDROID_NATIVE_API_LEVEL", "android-27")
+        .build()
+}
+
+fn build_cmake(opus_path: &Path) -> PathBuf {
+    let target = env::var("TARGET").unwrap();
+
+    if target.contains("android") {
+        build_cmake_android(opus_path)
+    } else {
+        build_cmake_sys(opus_path)
+    }
+}
+
 fn build_opus(is_static: bool) {
     let opus_path = Path::new("opus");
 
@@ -47,7 +116,7 @@ fn build_opus(is_static: bool) {
     );
 
     println!("cargo:info=Building Opus via CMake.");
-    let opus_build_dir = cmake::build(opus_path);
+    let opus_build_dir = build_cmake(opus_path);
     link_opus(is_static, opus_build_dir.display())
 }
 
